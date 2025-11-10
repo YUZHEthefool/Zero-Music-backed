@@ -60,8 +60,8 @@ func main() {
 	// 启动服务器
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	fmt.Printf("\n🎵 Zero Music Server 启动中...\n")
-	fmt.Printf("📍 服务地址: http://localhost:%d\n", cfg.Server.Port)
-	fmt.Printf("📁 音乐目录: %s\n\n", cfg.Music.Directory)
+	fmt.Printf("服务地址: http://localhost:%d\n", cfg.Server.Port)
+	fmt.Printf("音乐目录: %s\n\n", cfg.Music.Directory)
 
 	if err := router.Run(addr); err != nil {
 		log.Fatalf("服务器启动失败: %v", err)
