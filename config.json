@@ -4,6 +4,8 @@
     "port": 8080
   },
   "music": {
-    "directory": "./music"
+    "directory": "./music",
+    "supported_formats": [".mp3", ".flac", ".wav", ".m4a", ".ogg"],
+    "cache_ttl_minutes": 5
   }
 }
