@@ -154,8 +154,9 @@ func initLogger(lc fx.Lifecycle, params *Params) error {
 		OnStop: func(ctx context.Context) error {
 			if logFileHandle != nil {
 				logger.Info("正在关闭日志文件...")
-				logFileHandle.Close()
-			}
+				if err := logFileHandle.Close(); err != nil {
+					logger.Errorf("关闭日志文件时出错: %v", err)
+				}
 			return nil
 		},
 	})
