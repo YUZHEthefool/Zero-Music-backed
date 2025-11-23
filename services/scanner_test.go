@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,7 +44,7 @@ func TestMusicScanner_Scan(t *testing.T) {
 	}
 
 	scanner := NewMusicScanner(tmpDir, []string{".mp3"}, 5)
-	songs, err := scanner.Scan()
+	songs, err := scanner.Scan(context.Background())
 
 	if err != nil {
 		t.Fatalf("扫描失败: %v", err)
@@ -79,15 +80,15 @@ func TestMusicScanner_ScanCache(t *testing.T) {
 	scanner := NewMusicScanner(tmpDir, []string{".mp3"}, 5)
 
 	// 第一次扫描，应该会执行实际的扫描操作。
-	songs1, err := scanner.Scan()
+	songs1, err := scanner.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("第一次扫描失败: %v", err)
 	}
 
 	firstScanTime := scanner.lastScan
 
-	// 立即进行第二次扫描，应该会命中缓存。
-	songs2, err := scanner.Scan()
+	// 立即进行第二次扫描,应该会命中缓存。
+	songs2, err := scanner.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("第二次扫描失败: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestMusicScanner_Refresh(t *testing.T) {
 	scanner := NewMusicScanner(tmpDir, []string{".mp3"}, 5)
 
 	// 第一次扫描。
-	_, err := scanner.Scan()
+	_, err := scanner.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("第一次扫描失败: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestMusicScanner_Refresh(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// 手动刷新缓存。
-	err = scanner.Refresh()
+	err = scanner.Refresh(context.Background())
 	if err != nil {
 		t.Fatalf("刷新失败: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestMusicScanner_Refresh(t *testing.T) {
 func TestMusicScanner_ScanNonExistentDirectory(t *testing.T) {
 	scanner := NewMusicScanner("/non/existent/directory", []string{".mp3"}, 5)
 
-	_, err := scanner.Scan()
+	_, err := scanner.Scan(context.Background())
 	if err == nil {
 		t.Error("期望在扫描不存在的目录时返回错误")
 	}
@@ -165,7 +166,7 @@ func TestMusicScanner_GetSongs(t *testing.T) {
 	}
 
 	// 在扫描后调用，应返回扫描到的歌曲。
-	scanner.Scan()
+	scanner.Scan(context.Background())
 	songs = scanner.GetSongs()
 	if len(songs) != 1 {
 		t.Errorf("期望在扫描后歌曲数量为 1, 得到 %d", len(songs))
@@ -190,7 +191,7 @@ func TestMusicScanner_GetSongCount(t *testing.T) {
 	}
 
 	// 扫描后。
-	scanner.Scan()
+	scanner.Scan(context.Background())
 	count = scanner.GetSongCount()
 	if count != 1 {
 		t.Errorf("期望在扫描后数量为 1, 得到 %d", count)
@@ -214,7 +215,7 @@ func TestMusicScanner_ConcurrentAccess(t *testing.T) {
 	// Goroutine 1: 持续调用 Scan。
 	go func() {
 		for i := 0; i < 10; i++ {
-			scanner.Scan()
+			scanner.Scan(context.Background())
 			time.Sleep(1 * time.Millisecond)
 		}
 		done <- true

@@ -1,6 +1,9 @@
 package handlers
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 // APIError 定义了 API 返回的标准化错误结构。
 type APIError struct {
@@ -18,17 +21,24 @@ func (e *APIError) Error() string {
 func NewNotFoundError(resource string) *APIError {
 	return &APIError{
 		Code:    "NOT_FOUND",
-		Message: fmt.Sprintf("%s not found", resource),
+		Message: fmt.Sprintf("%s未找到", resource),
 	}
 }
 
 // NewInternalError 创建一个表示内部服务器错误的 APIError。
+// 在生产环境中（ZERO_MUSIC_ENV=production），不会暴露错误详情。
 func NewInternalError(err error) *APIError {
-	return &APIError{
+	apiErr := &APIError{
 		Code:    "INTERNAL_ERROR",
-		Message: "Internal server error",
-		Details: err.Error(),
+		Message: "内部服务器错误",
 	}
+	
+	// 仅在非生产环境中暴露错误详情
+	if os.Getenv("ZERO_MUSIC_ENV") != "production" {
+		apiErr.Details = err.Error()
+	}
+	
+	return apiErr
 }
 
 // NewBadRequestError 创建一个表示无效请求的 APIError。

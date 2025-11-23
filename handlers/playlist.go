@@ -1,27 +1,29 @@
 package handlers
 
 import (
-	"log"
 	"net/http"
-	"strings"
-	"zero-music/config"
+	"regexp"
+	"zero-music/logger"
+	"zero-music/middleware"
+	"zero-music/models"
 	"zero-music/services"
 
 	"github.com/gin-gonic/gin"
 )
 
+var (
+	// validIDPattern 验证歌曲 ID 是否为有效的 SHA256 哈希（32 字节十六进制，即 64 个字符）
+	// 注意：generateID 函数使用前 16 字节，因此是 32 个十六进制字符
+	validIDPattern = regexp.MustCompile(models.ValidIDPattern())
+)
+
 // PlaylistHandler 负责处理与播放列表相关的 API 请求。
 type PlaylistHandler struct {
-	scanner *services.MusicScanner
+	scanner services.Scanner
 }
 
 // NewPlaylistHandler 创建一个新的 PlaylistHandler 实例。
-func NewPlaylistHandler(cfg *config.Config) *PlaylistHandler {
-	scanner := services.NewMusicScanner(
-		cfg.Music.Directory,
-		cfg.Music.SupportedFormats,
-		cfg.Music.CacheTTLMinutes,
-	)
+func NewPlaylistHandler(scanner services.Scanner) *PlaylistHandler {
 	return &PlaylistHandler{
 		scanner: scanner,
 	}
@@ -36,10 +38,12 @@ func NewPlaylistHandler(cfg *config.Config) *PlaylistHandler {
 // @Failure 500 {object} APIError "服务器错误"
 // @Router /api/songs [get]
 func (h *PlaylistHandler) GetAllSongs(c *gin.Context) {
+	requestID := middleware.GetRequestID(c)
+
 	// 扫描音乐文件。
-	songs, err := h.scanner.Scan()
+	songs, err := h.scanner.Scan(c.Request.Context())
 	if err != nil {
-		log.Printf("扫描音乐文件失败: %v", err)
+		logger.WithRequestID(requestID).Errorf("扫描音乐文件失败: %v", err)
 		c.JSON(http.StatusInternalServerError, NewInternalError(err))
 		return
 	}
@@ -64,29 +68,30 @@ func (h *PlaylistHandler) GetAllSongs(c *gin.Context) {
 // @Router /api/song/{id} [get]
 func (h *PlaylistHandler) GetSongByID(c *gin.Context) {
 	id := c.Param("id")
+	requestID := middleware.GetRequestID(c)
 
-	// 验证 ID 格式，防止路径遍历。
-	if strings.Contains(id, "..") || strings.Contains(id, "/") || strings.Contains(id, "\\") {
+	// 验证 ID 格式，确保是有效的 SHA256 哈希格式，防止路径遍历。
+	if !validIDPattern.MatchString(id) {
+		logger.WithRequestID(requestID).Warnf("无效的歌曲 ID 格式: %s", id)
 		c.JSON(http.StatusBadRequest, NewBadRequestError("无效的歌曲 ID 格式"))
 		return
 	}
 
-	// 扫描以获取所有歌曲。
-	songs, err := h.scanner.Scan()
+	// 先执行扫描以确保缓存是最新的。
+	_, err := h.scanner.Scan(c.Request.Context())
 	if err != nil {
-		log.Printf("扫描音乐文件失败: %v", err)
+		logger.WithRequestID(requestID).Errorf("扫描音乐文件失败: %v", err)
 		c.JSON(http.StatusInternalServerError, NewInternalError(err))
 		return
 	}
 
-	// 查找具有指定 ID 的歌曲。
-	for _, song := range songs {
-		if song.ID == id {
-			c.JSON(http.StatusOK, song)
-			return
-		}
+	// 使用索引快速查找歌曲。
+	song := h.scanner.GetSongByID(id)
+	if song == nil {
+		logger.WithRequestID(requestID).Warnf("歌曲未找到: %s", id)
+		c.JSON(http.StatusNotFound, NewNotFoundError("歌曲"))
+		return
 	}
 
-	// 如果未找到歌曲，则返回 404 错误。
-	c.JSON(http.StatusNotFound, NewNotFoundError("歌曲"))
+	c.JSON(http.StatusOK, song)
 }

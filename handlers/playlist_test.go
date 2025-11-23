@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 	"zero-music/config"
+	"zero-music/services"
 
 	"github.com/gin-gonic/gin"
 )
@@ -40,9 +41,16 @@ func setupTestEnv(t *testing.T) (*gin.Engine, string) {
 		},
 	}
 
+	// 创建扫描器和处理器。
+	scanner := services.NewMusicScanner(
+		cfg.Music.Directory,
+		cfg.Music.SupportedFormats,
+		cfg.Music.CacheTTLMinutes,
+	)
+
 	// 创建 Gin 路由器并注册处理器。
 	router := gin.New()
-	handler := NewPlaylistHandler(cfg)
+	handler := NewPlaylistHandler(scanner)
 	router.GET("/api/songs", handler.GetAllSongs)
 	router.GET("/api/song/:id", handler.GetSongByID)
 
@@ -122,8 +130,8 @@ func TestGetSongByID_Success(t *testing.T) {
 func TestGetSongByID_NotFound(t *testing.T) {
 	router, _ := setupTestEnv(t)
 
-	// 请求一个不存在的歌曲 ID。
-	req, _ := http.NewRequest("GET", "/api/song/nonexistent", nil)
+	// 请求一个格式正确但不存在的歌曲 ID（有效的 32 字符十六进制）。
+	req, _ := http.NewRequest("GET", "/api/song/0123456789abcdef0123456789abcdef", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -137,12 +145,15 @@ func TestGetSongByID_InvalidFormat(t *testing.T) {
 	router, _ := setupTestEnv(t)
 
 	testCases := []struct {
-		name string
-		id   string
+		name         string
+		id           string
+		expectedCode int
 	}{
-		{"包含 '..' 的路径遍历", "../etc/passwd"},
-		{"包含 '/' 的路径", "path/to/file"},
-		{"包含 '\\' 的路径", "path\\to\\file"},
+		{"包含 '..' 的路径遍历", "../etc/passwd", http.StatusNotFound},  // 路由器不匹配
+		{"包含 '/' 的路径", "path/to/file", http.StatusNotFound},      // 路由器不匹配
+		{"包含 '\\' 的路径", "path\\to\\file", http.StatusBadRequest}, // 验证失败
+		{"非十六进制字符", "nonexistent", http.StatusBadRequest},        // 验证失败
+		{"长度不正确", "abc123", http.StatusBadRequest},               // 验证失败
 	}
 
 	for _, tc := range testCases {
@@ -151,10 +162,8 @@ func TestGetSongByID_InvalidFormat(t *testing.T) {
 			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
 
-			// 对于无效格式，我们期望返回 400 Bad Request。
-			// 404 也是可接受的，因为即使验证通过，歌曲也找不到。
-			if w.Code != http.StatusBadRequest && w.Code != http.StatusNotFound {
-				t.Errorf("对于 %s，期望状态码 400 或 404, 得到 %d", tc.name, w.Code)
+			if w.Code != tc.expectedCode {
+				t.Errorf("对于 %s，期望状态码 %d, 得到 %d", tc.name, tc.expectedCode, w.Code)
 			}
 		})
 	}

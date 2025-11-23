@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 	"zero-music/config"
+	"zero-music/services"
 
 	"github.com/gin-gonic/gin"
 )
@@ -25,6 +26,11 @@ func setupStreamTestEnv(t *testing.T) (*gin.Engine, string, string) {
 	}
 
 	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Host:         "0.0.0.0",
+			Port:         8080,
+			MaxRangeSize: 100 * 1024 * 1024, // 100MB
+		},
 		Music: config.MusicConfig{
 			Directory:        tmpDir,
 			SupportedFormats: []string{".mp3"},
@@ -32,11 +38,18 @@ func setupStreamTestEnv(t *testing.T) (*gin.Engine, string, string) {
 		},
 	}
 
+	// 创建扫描器。
+	scanner := services.NewMusicScanner(
+		cfg.Music.Directory,
+		cfg.Music.SupportedFormats,
+		cfg.Music.CacheTTLMinutes,
+	)
+
 	router := gin.New()
-	handler := NewStreamHandler(cfg)
+	handler := NewStreamHandler(scanner, cfg)
 
 	// 为了获取歌曲 ID，我们需要一个播放列表端点。
-	playlistHandler := NewPlaylistHandler(cfg)
+	playlistHandler := NewPlaylistHandler(scanner)
 	router.GET("/api/songs", playlistHandler.GetAllSongs)
 	router.GET("/api/stream/:id", handler.StreamAudio)
 
@@ -87,7 +100,8 @@ func TestStreamAudio_Success(t *testing.T) {
 func TestStreamAudio_NotFound(t *testing.T) {
 	router, _, _ := setupStreamTestEnv(t)
 
-	req, _ := http.NewRequest("GET", "/api/stream/nonexistent", nil)
+	// 使用格式正确但不存在的歌曲 ID（有效的 32 字符十六进制）
+	req, _ := http.NewRequest("GET", "/api/stream/0123456789abcdef0123456789abcdef", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -151,7 +165,7 @@ func TestStreamAudio_InvalidRange(t *testing.T) {
 	songID := getSongID(t, router)
 
 	testCases := []struct {
-		name  string
+		name   string
 		range_ string
 	}{
 		{"无效格式", "invalid"},

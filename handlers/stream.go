@@ -3,46 +3,71 @@ package handlers
 import (
 	"fmt"
 	"io"
-	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"zero-music/config"
+	"zero-music/logger"
+	"zero-music/middleware"
+	"zero-music/models"
 	"zero-music/services"
 
 	"github.com/gin-gonic/gin"
 )
 
-const (
-	// MaxRangeSize 定义了单次 Range 请求允许传输的最大字节数 (100MB)。
-	MaxRangeSize = 100 * 1024 * 1024
+var (
+	// validIDPatternStream 验证歌曲 ID 是否为有效的 SHA256 哈希（32 字节十六进制）
+	validIDPatternStream = regexp.MustCompile(models.ValidIDPattern())
 )
+
+// getMimeType 根据文件扩展名返回对应的 MIME 类型。
+func getMimeType(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	mimeType := mime.TypeByExtension(ext)
+	if mimeType == "" {
+		// 为常见音频格式提供备选 MIME 类型
+		switch ext {
+		case ".mp3":
+			return "audio/mpeg"
+		case ".flac":
+			return "audio/flac"
+		case ".wav":
+			return "audio/wav"
+		case ".m4a":
+			return "audio/mp4"
+		case ".ogg":
+			return "audio/ogg"
+		default:
+			return "application/octet-stream"
+		}
+	}
+	return mimeType
+}
 
 // StreamHandler 负责处理音频流相关的 API 请求。
 type StreamHandler struct {
-	scanner     *services.MusicScanner
-	musicDir    string
-	musicDirAbs string // 预先计算的音乐目录绝对路径，用于安全检查。
+	scanner      services.Scanner
+	musicDir     string
+	musicDirAbs  string // 预先计算的音乐目录绝对路径，用于安全检查。
+	maxRangeSize int64  // 单次 Range 请求允许的最大字节数。
 }
 
 // NewStreamHandler 创建一个新的 StreamHandler 实例。
-func NewStreamHandler(cfg *config.Config) *StreamHandler {
-	scanner := services.NewMusicScanner(
-		cfg.Music.Directory,
-		cfg.Music.SupportedFormats,
-		cfg.Music.CacheTTLMinutes,
-	)
+func NewStreamHandler(scanner services.Scanner, cfg *config.Config) *StreamHandler {
 	musicDirAbs, err := filepath.Abs(cfg.Music.Directory)
 	if err != nil {
-		log.Printf("警告: 获取音乐目录的绝对路径失败: %v", err)
+		logger.Warnf("获取音乐目录的绝对路径失败: %v", err)
 		musicDirAbs = cfg.Music.Directory
 	}
 	return &StreamHandler{
-		scanner:     scanner,
-		musicDir:    cfg.Music.Directory,
-		musicDirAbs: musicDirAbs,
+		scanner:      scanner,
+		musicDir:     cfg.Music.Directory,
+		musicDirAbs:  musicDirAbs,
+		maxRangeSize: cfg.Server.MaxRangeSize,
 	}
 }
 
@@ -62,17 +87,19 @@ func NewStreamHandler(cfg *config.Config) *StreamHandler {
 // @Router /api/stream/{id} [get]
 func (h *StreamHandler) StreamAudio(c *gin.Context) {
 	id := c.Param("id")
+	requestID := middleware.GetRequestID(c)
 
-	// 验证 ID 格式，防止路径遍历攻击。
-	if id == "" || strings.Contains(id, "..") || strings.Contains(id, "/") || strings.Contains(id, "\\") {
+	// 验证 ID 格式，确保是有效的 SHA256 哈希格式，防止路径遍历攻击。
+	if !validIDPatternStream.MatchString(id) {
+		logger.WithRequestID(requestID).Warnf("无效的歌曲 ID 格式: %s", id)
 		c.JSON(http.StatusBadRequest, NewBadRequestError("无效的歌曲 ID 格式"))
 		return
 	}
 
 	// 扫描音乐文件以验证歌曲是否存在。
-	songs, err := h.scanner.Scan()
+	songs, err := h.scanner.Scan(c.Request.Context())
 	if err != nil {
-		log.Printf("扫描音乐文件失败: %v", err)
+		logger.WithRequestID(requestID).Errorf("扫描音乐文件失败: %v", err)
 		c.JSON(http.StatusInternalServerError, NewInternalError(err))
 		return
 	}
@@ -89,6 +116,7 @@ func (h *StreamHandler) StreamAudio(c *gin.Context) {
 	}
 
 	if !found {
+		logger.WithRequestID(requestID).Warnf("歌曲未找到: %s", id)
 		c.JSON(http.StatusNotFound, NewNotFoundError("歌曲"))
 		return
 	}
@@ -96,14 +124,14 @@ func (h *StreamHandler) StreamAudio(c *gin.Context) {
 	// 验证文件路径的安全性。
 	cleanPath, err := filepath.Abs(songPath)
 	if err != nil {
-		log.Printf("获取文件绝对路径失败 %s: %v", songPath, err)
+		logger.WithRequestID(requestID).Errorf("获取文件绝对路径失败 %s: %v", songPath, err)
 		c.JSON(http.StatusInternalServerError, NewInternalError(err))
 		return
 	}
 
 	// 确保请求的路径位于配置的音乐目录内。
 	if !strings.HasPrefix(cleanPath, h.musicDirAbs) {
-		log.Printf("安全警告: 拒绝访问 - 路径 %s 不在音乐目录 %s 内", cleanPath, h.musicDirAbs)
+		logger.WithRequestID(requestID).Warnf("安全警告: 拒绝访问 - 路径 %s 不在音乐目录 %s 内", cleanPath, h.musicDirAbs)
 		c.JSON(http.StatusForbidden, NewForbiddenError("拒绝访问"))
 		return
 	}
@@ -114,7 +142,7 @@ func (h *StreamHandler) StreamAudio(c *gin.Context) {
 		if os.IsNotExist(err) {
 			c.JSON(http.StatusNotFound, NewNotFoundError("音频文件"))
 		} else {
-			log.Printf("无法获取文件信息 %s: %v", cleanPath, err)
+			logger.WithRequestID(requestID).Errorf("无法获取文件信息 %s: %v", cleanPath, err)
 			c.JSON(http.StatusInternalServerError, NewInternalError(err))
 		}
 		return
@@ -122,7 +150,7 @@ func (h *StreamHandler) StreamAudio(c *gin.Context) {
 
 	// 确保请求的不是一个目录。
 	if fileInfo.IsDir() {
-		log.Printf("安全警告: 尝试流式传输目录: %s", cleanPath)
+		logger.WithRequestID(requestID).Warnf("安全警告: 尝试流式传输目录: %s", cleanPath)
 		c.JSON(http.StatusForbidden, NewForbiddenError("无法流式传输目录"))
 		return
 	}
@@ -130,7 +158,7 @@ func (h *StreamHandler) StreamAudio(c *gin.Context) {
 	// 打开音频文件。
 	file, err := os.Open(cleanPath)
 	if err != nil {
-		log.Printf("打开音频文件失败 %s: %v", cleanPath, err)
+		logger.WithRequestID(requestID).Errorf("打开音频文件失败 %s: %v", cleanPath, err)
 		c.JSON(http.StatusInternalServerError, NewInternalError(err))
 		return
 	}
@@ -139,17 +167,22 @@ func (h *StreamHandler) StreamAudio(c *gin.Context) {
 	fileSize := fileInfo.Size()
 
 	// 记录访问日志。
-	log.Printf("音频流请求: id=%s, path=%s, ip=%s, size=%d", id, cleanPath, c.ClientIP(), fileSize)
+	logger.WithRequestID(requestID).WithFields(map[string]interface{}{
+		"song_id":   id,
+		"file_path": cleanPath,
+		"file_size": fileSize,
+	}).Info("音频流请求")
 
 	// 处理 Range 请求以支持断点续传。
 	rangeHeader := c.GetHeader("Range")
 	if rangeHeader != "" {
-		h.serveRange(c, file, fileSize, rangeHeader, filepath.Base(cleanPath))
+		h.serveRange(c, file, fileSize, rangeHeader, filepath.Base(cleanPath), requestID)
 		return
 	}
 
 	// 为完整文件传输设置响应头。
-	c.Header("Content-Type", "audio/mpeg")
+	mimeType := getMimeType(cleanPath)
+	c.Header("Content-Type", mimeType)
 	c.Header("Content-Length", fmt.Sprintf("%d", fileSize))
 	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", filepath.Base(cleanPath)))
 	c.Header("Accept-Ranges", "bytes")
@@ -158,12 +191,12 @@ func (h *StreamHandler) StreamAudio(c *gin.Context) {
 	c.Status(http.StatusOK)
 	written, err := io.Copy(c.Writer, file)
 	if err != nil {
-		log.Printf("流式传输音频时出错 (已写入 %d/%d 字节): %v", written, fileSize, err)
+		logger.WithRequestID(requestID).Errorf("流式传输音频时出错 (已写入 %d/%d 字节): %v", written, fileSize, err)
 	}
 }
 
 // serveRange 处理 HTTP Range 请求，用于支持音频的断点续传。
-func (h *StreamHandler) serveRange(c *gin.Context, file *os.File, fileSize int64, rangeHeader string, filename string) {
+func (h *StreamHandler) serveRange(c *gin.Context, file *os.File, fileSize int64, rangeHeader string, filename string, requestID string) {
 	ranges := strings.TrimPrefix(rangeHeader, "bytes=")
 	parts := strings.Split(ranges, "-")
 
@@ -205,16 +238,17 @@ func (h *StreamHandler) serveRange(c *gin.Context, file *os.File, fileSize int64
 	contentLength := end - start + 1
 
 	// 限制单次请求的数据大小。
-	if contentLength > MaxRangeSize {
-		log.Printf("Range 请求过大: %d 字节 (最大 %d)", contentLength, MaxRangeSize)
-		c.JSON(http.StatusBadRequest, NewBadRequestError(fmt.Sprintf("请求范围过大 (最大 %d 字节)", MaxRangeSize)))
+	if contentLength > h.maxRangeSize {
+		logger.WithRequestID(requestID).Warnf("Range 请求过大: %d 字节 (最大 %d)", contentLength, h.maxRangeSize)
+		c.JSON(http.StatusBadRequest, NewBadRequestError(fmt.Sprintf("请求范围过大 (最大 %d 字节)", h.maxRangeSize)))
 		return
 	}
 
 	// 设置部分内容响应的头部。
+	mimeType := getMimeType(filename)
 	c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
 	c.Header("Content-Length", fmt.Sprintf("%d", contentLength))
-	c.Header("Content-Type", "audio/mpeg")
+	c.Header("Content-Type", mimeType)
 	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", filename))
 	c.Header("Accept-Ranges", "bytes")
 	c.Status(http.StatusPartialContent)
@@ -222,7 +256,7 @@ func (h *StreamHandler) serveRange(c *gin.Context, file *os.File, fileSize int64
 	// 将文件指针移动到请求的起始位置。
 	_, err := file.Seek(start, 0)
 	if err != nil {
-		log.Printf("定位文件到 %d 位置失败: %v", start, err)
+		logger.WithRequestID(requestID).Errorf("定位文件到 %d 位置失败: %v", start, err)
 		c.JSON(http.StatusInternalServerError, NewInternalError(err))
 		return
 	}
@@ -230,6 +264,6 @@ func (h *StreamHandler) serveRange(c *gin.Context, file *os.File, fileSize int64
 	// 传输指定范围的数据。
 	written, err := io.CopyN(c.Writer, file, contentLength)
 	if err != nil && err != io.EOF {
-		log.Printf("流式传输范围时出错 (已写入 %d/%d 字节): %v", written, contentLength, err)
+		logger.WithRequestID(requestID).Errorf("流式传输范围时出错 (已写入 %d/%d 字节): %v", written, contentLength, err)
 	}
 }
