@@ -160,5 +160,10 @@ func (s *MusicScanner) GetSongCount() int {
 func (s *MusicScanner) GetSongByID(id string) *models.Song {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.songIndex[id]
+	song, ok := s.songIndex[id]
+	if !ok || song == nil {
+		return nil
+	}
+	copiedSong := *song
+	return &copiedSong
 }
